@@ -9,8 +9,8 @@
 </node>
 </node>
 <node CREATED="1274554317816" HGAP="27" ID="ID_84133354" MODIFIED="1274555344148" STYLE="bubble" TEXT="Behavior" VSHIFT="35">
-<node CREATED="1274554748036" ID="ID_1089801039" MODIFIED="1274554949818" TEXT="If no sequence, client receives the next even that matchers filter set"/>
-<node CREATED="1274554775012" ID="ID_491369432" MODIFIED="1274554949818" TEXT="If sequence given, all events happening after that sequence are returned that match given event filter set. If sequence not found, all events are returned"/>
+<node CREATED="1274554748036" ID="ID_1089801039" MODIFIED="1274715507602" TEXT="If no sequence, client receives the next event that matchers filter set"/>
+<node CREATED="1274554775012" ID="ID_491369432" MODIFIED="1274715896184" TEXT="If sequence given, all events happening after that sequence are returned that match given event filter set.&#xa;If sequence not found, a 408 Request Timeout is returned. The client should take appropriate action given that events are lost, for example resetting the state of status controls. For the next reqeust, the client shoud behave as if it were new and not specify a sequence."/>
 <node CREATED="1274554811043" ID="ID_100014694" MODIFIED="1274554949822" TEXT="last known sequence number (not just of events matching set) is returned. Client stores this and provides it in subsequent requests"/>
 </node>
 </node>
@@ -20,11 +20,70 @@
 <node CREATED="1274553248465" ID="ID_828001133" MODIFIED="1274555203974" TEXT=" Are spawned from the socket dispatch thread"/>
 <node CREATED="1274555167166" ID="ID_964144680" MODIFIED="1274555205246" TEXT="Use a wait condition for new event"/>
 <node CREATED="1274555163275" ID="ID_691869525" MODIFIED="1274555206581" TEXT="On new event, reply back on the connection"/>
+<node CREATED="1274716315278" ID="ID_1654600501" MODIFIED="1274716805627">
+<richcontent TYPE="NODE"><html>
+  <head>
+    
+  </head>
+  <body>
+    <p>
+      <b>Retrieval - position specified</b>
+    </p>
+    <ol>
+      <li>
+        <i>position</i>&#160;= provided sequence % BUFFER_SIZE
+      </li>
+      <li>
+        If buffer[<i>position</i>].Sequence != provided sequence
+
+        <ol>
+          <li>
+            Return 408 Request Timeout (stale sequence)
+          </li>
+        </ol>
+      </li>
+      <li>
+        Return all events provided sequence to <i>sequence</i>
+      </li>
+    </ol>
+    <p>
+      <b>Retrieval - no position specified </b>
+    </p>
+    <ol>
+      <li>
+        Wait until a new event happens that matches event set given
+      </li>
+      <li>
+        Return event(s), as well as <i>sequence</i>&#160;(perhaps in a header value?)
+      </li>
+    </ol>
+  </body>
+</html>
+</richcontent>
+</node>
 </node>
 <node CREATED="1274552537958" ID="ID_1056505844" MODIFIED="1274555981104" STYLE="bubble" TEXT="event dispatch mechanism">
-<node CREATED="1274555247760" ID="ID_1911503207" MODIFIED="1274555300475" TEXT="Inserts event into event map keyed by sequence number"/>
-<node CREATED="1274555306191" ID="ID_1205142490" MODIFIED="1274555315563" TEXT="increments sequence number"/>
-<node CREATED="1274555985514" ID="ID_1583282604" MODIFIED="1274555990757" TEXT="Called by a public method"/>
+<node CREATED="1274715954573" ID="ID_788820298" MODIFIED="1274716315274">
+<richcontent TYPE="NODE"><html>
+  <head>
+    
+  </head>
+  <body>
+    <p>
+      <b>Insertion</b>
+    </p>
+    <ol>
+      <li>
+        Insert into circular buffer at position [<i>sequence</i>&#160;% BUFFER_SIZE]
+      </li>
+      <li>
+        Increment <i>sequence</i>
+      </li>
+    </ol>
+  </body>
+</html>
+</richcontent>
+</node>
 </node>
 <node CREATED="1274552518695" HGAP="17" ID="ID_1910300269" MODIFIED="1274555319949" STYLE="bubble" TEXT="socket dispatch thread" VSHIFT="37">
 <node CREATED="1274553454911" ID="ID_411659383" MODIFIED="1274553464298" TEXT="Creates child connection handlers"/>

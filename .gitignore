@@ -1,0 +1,6 @@
+Debug
+*.session
+*.tags
+*.mk
+*.project
+*.workspace
