@@ -3,12 +3,11 @@
 
 #include <string>
 #include <boost/thread.hpp>
-#include <microhttpd.h>
-
+#include <boost/regex.hpp>
 
 using namespace std;
 
-namespace restcomet
+namespace rc
 {
 
 const uint RESTCOMET_EVENT_BUFFER_SIZE = 2048;
@@ -36,15 +35,6 @@ class restcomet
 		Event m_EventBuffer[RESTCOMET_EVENT_BUFFER_SIZE];
 		uint m_currentSequence;
 		
-		static int ConnectHandler(	void * cls,
-											struct MHD_Connection * connection,
-											const char * url,
-											const char * method,
-											const char * version,
-											const char * upload_data,
-											size_t * upload_data_size,
-											void ** ptr);
-		struct MHD_Daemon* d;
 		
 
 	//Singleton & non-copyable stuff		
@@ -54,7 +44,7 @@ class restcomet
 	private:
 		restcomet( const restcomet& rhs );
 		restcomet& operator=( const restcomet& rhs );
-		restcomet();
+		restcomet( int port );
 		~restcomet();
 		static restcomet* ms_instance;
 
