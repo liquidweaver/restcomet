@@ -2,9 +2,15 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <sys/fcntl.h>
+#include <signal.h>
 #include <map>
+#include <sstream>
+#include <vector>
 #include <boost/regex.hpp>
+#include <set>
 
+using namespace std;
 
 //DEBUGGING
 #include <iostream>
@@ -27,7 +33,7 @@ void restcomet::SubmitEvent( const string& guid, const string& eventData )
 	currentEvent.timestamp = time( NULL );
 	currentEvent.eventData = eventData;
 
-
+	cout << "Insert Sequence: " << m_currentSequence << endl;
 	//notify all
 	m_conditionNewEvent.notify_all();
 }
@@ -78,17 +84,83 @@ void restcomet::ReplacePercentEncoded( string& workString )
 		{
 				numPos++;
 		}
-		
+
 		if ( numPos > pos ) //Yay, a valid code was found
 		{
 			int value;
-			sscanf( workString.substr( pos + 1, numPos - pos ).c_str(), "%x", &value); 
+			sscanf( workString.substr( pos + 1, numPos - pos ).c_str(), "%x", &value);
 			char translated = (char) value;
 			workString.replace( pos, numPos - pos + 1, string( &translated, 1 ).c_str() );
 		}
-		
+
 		pos = workString.find( "%" );
 	}
+}
+
+string restcomet::GenerateRandomString() throw()
+{
+
+	static const char alphanum[] =
+        "0123456789"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz";
+	string retString = "0123456789012345";
+
+	 for (int i = 0; i < retString.length(); ++i)
+	 {
+        retString[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
+    }
+
+    return retString;
+}
+
+string restcomet::SerializeEvents( const string& boundary, const vector<Event>& events )
+{
+	ostringstream sEvents;
+
+	for ( vector<Event>::const_iterator anEvent = events.begin();
+			anEvent != events.end();
+			++anEvent)
+	{
+		ostringstream eventContent;
+
+		eventContent	<< "S[" << anEvent->sequence
+							<< "] G[" << anEvent->guid
+							<< "] T[" << anEvent->timestamp
+							<< "] L[" << anEvent->eventData.length() << "]\r\n"
+							<< anEvent->eventData;
+
+		sEvents 	<< "--" << boundary << "\r\n"
+					<< "Content-Type: application/restcomet-event\r\n"
+					<< "Content-Length: " << eventContent.str().length() << "\r\n\r\n"
+					<< eventContent.str() << "\r\n";
+	}
+	sEvents << "--" << boundary << "--";
+
+	return sEvents.str();
+}
+
+string restcomet::CreateHTTPResponse( const string& codeAndDescription, const string& contentType, const string& body )
+{
+	ostringstream response;
+	char dateBuffer[200];
+	time_t t;
+	tm * ptm;
+	time ( & t );
+	ptm = gmtime ( & t );
+	strftime( dateBuffer, 200, "%a, %d %b %Y %X GMT", ptm);
+
+
+
+	response << "HTTP/1.1 " << codeAndDescription << "\r\n"
+					"Date: " << dateBuffer << "\r\n"
+					"Pragma: no-cache\r\n"
+					"Cache-Control: no-cache\r\n"
+					"Server: RestComet\r\n"
+					"Content-Type: " << contentType << "\r\n"
+					"Content-Length: " << body.length() << "\r\n\r\n"
+					<< body;
+	return response.str();
 }
 
 void restcomet::SocketDispatchThreadFunc()
@@ -99,6 +171,9 @@ void restcomet::SocketDispatchThreadFunc()
 		struct sockaddr_in clientAddress;
 		unsigned int clientLen = sizeof( clientAddress );
 		int clientSock = accept( m_listenSocket, ( struct sockaddr* ) &clientAddress, &clientLen );
+		int on = 1;
+		if ( setsockopt( clientSock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof( on ) ) < 0 )
+			cout <<  "Could not set SO_KEEPALIVE on client socket";
 
 		if ( clientSock >= 0 )
 		{
@@ -110,24 +185,88 @@ void restcomet::SocketDispatchThreadFunc()
 void restcomet::ConnectionHandlerThreadFunc( int clientSock )
 {
 	char buf[4096];
-	static char success[] =	"HTTP/1.1 200 OK\r\n"
-	                        "Content-Type: text/html\r\n\r\n"
-	                        "<html><body><h1>restcomet</h1></body></html>";
-	static char test[] =	"HTTP/1.1 200 OK\r\n"
-	                     "Content-Type: text/html\r\n\r\n"
-	                     "<html><body><form method=\"POST\" action=\"\">"
-	                     "<input type=\"hidden\" name=\"post1\" value=\"blah\">"
-	                     "<input type=\"hidden\" name=\"post2\" value=\"blah&\">"
-	                     "CLICK THIS<input type=\"submit\" name=\"submitbutton\" value=\"GO!\">"
-	                     "</form></body></html>";
 	int recvd = recv( clientSock, buf, 4096, 0 );
-
-	if ( recvd > 0 )
+	if (fcntl( clientSock, F_SETFL, O_NONBLOCK) == 1)
+		throw CreateHTTPResponse( "500 Internal Server Error", "text/html", "Could not set non-blocking on socket" );
+	try
 	{
-		string asText( buf, recvd );
-		std::cout << asText << endl;
-		send( clientSock, test, sizeof( test ), 0 );
+		if ( recvd > 0 )
+		{
+			uint sequence = m_currentSequence + 1;
+			bool sequenceSpecified = false;
+			string rawRequest( buf, recvd );
+			boost::regex rxResource( "^POST /EVENTS\\.LIST HTTP/1\\.1" );
+			boost::regex rxSequence( "X-RESTCOMET-SEQUENCE: (\\d+)" );
+			boost::regex rxGuid( "[^:|]+" );
+			boost::smatch matches;
+			if (!boost::regex_search(rawRequest, matches, rxResource ) )
+				throw CreateHTTPResponse( "404 Not Found", "text/html", "<h3>404 Not Found</h3><small>Did you want to post to EVENTS.LIST by chance?</small>" );
+			if ( boost::regex_search(rawRequest, matches, rxSequence ) )
+			{
+				stringstream seqStream;
+				seqStream << matches[1];
+				seqStream >> sequence;
+			}
+			set<string> eventFilter;
+
+			int postStart = rawRequest.find( "\r\n\r\n" );
+			if ( postStart == string::npos || postStart + 4 > rawRequest.length() )
+				throw CreateHTTPResponse( "400 No Post Data", "text/html", "400 No Post Data" );
+
+			string postString = rawRequest.substr( postStart + 4, rawRequest.length() ); //Yeah, length will be greater but I want all of it anyways
+			map<string, string> postData = DecodePostData( postString );
+
+			if ( postData.find("events") == postData.end() )
+				throw CreateHTTPResponse( "400 No Events Specified", "text/html", "400 No Events Specified" );
+
+			boost::match_results<std::string::const_iterator> terms;
+			string::const_iterator start, end;
+			start = postData["events"].begin();
+			end = postData["events"].end();
+			while ( boost::regex_search( start, end, terms, rxGuid, boost::match_default ) )
+			{
+				eventFilter.insert( string( terms[0].first, terms[0].second ) );
+				start = terms[0].second;
+			}
+
+			vector<Event> eventsToReport;
+			do
+			{
+				boost::shared_lock<boost::shared_mutex> eventBufferSharedLock( m_bufferMutex );
+				if ( sequence > m_currentSequence + 1 )
+					throw CreateHTTPResponse( "400 Future Sequence", "text/html", "400 Future Sequence" );
+
+				for( ;sequence <= m_currentSequence; ++sequence )
+				{
+					uint eventPos = sequence % RESTCOMET_EVENT_BUFFER_SIZE;
+					if ( eventFilter.find( m_EventBuffer[eventPos].guid ) != eventFilter.end() )
+						eventsToReport.push_back( m_EventBuffer[eventPos] );
+				}
+
+				if (eventsToReport.empty() )
+					m_conditionNewEvent.wait( eventBufferSharedLock );
+
+				//Check socket health
+				if ( recv( clientSock, buf, 0, MSG_PEEK ) == 0 ) //Will be 0 is socket disconnected. Requires O_NONBLOCK to work
+					throw 0;
+			} while (eventsToReport.empty());
+
+			//Ok - send events
+			string boundary, serializedEvents;
+			boundary = GenerateRandomString();
+			serializedEvents = SerializeEvents( boundary, eventsToReport );
+			string outData = CreateHTTPResponse( "200 OK", string( "multipart/mixed; boundary=\"" ) + boundary + "\"", serializedEvents );
+			int bytesSent = send( clientSock, outData.c_str(), outData.length(), 0 );
+/*			if (  bytesSent > 0 )
+				std::cout << "Good - " << bytesSent << " bytes sent (outData size: " << outData.str().length() << ")."  << endl;*/
+		}
 	}
+	catch ( const string& response )
+	{
+		send( clientSock, response.c_str(), response.length(), 0 );
+	}
+	catch(...)
+	{ } //Cancel this request
 
 	close( clientSock );
 }
@@ -136,7 +275,7 @@ restcomet::restcomet( int port ) : m_currentSequence( 0 ), m_terminated( false )
 {
 
 	struct sockaddr_in thisAddress;
-
+	signal(SIGPIPE, SIG_IGN); // Block SIGPIPE
 	m_listenSocket = socket( PF_INET, SOCK_STREAM, IPPROTO_TCP );
 
 	if ( m_listenSocket == 0 )

@@ -2,6 +2,7 @@
 #define RESTCOMET_H
 
 #include <string>
+#include <vector>
 #include <boost/thread.hpp>
 #include <boost/regex.hpp>
 
@@ -23,29 +24,32 @@ struct Event
 class restcomet
 {
 	public:
-	
+
 		void SubmitEvent( const string& guid, const string& eventData );
 
 	private:
 		void DispatchEvent( const Event& event );
 		static map<string, string> DecodePostData( const string& rawPostData );
-		static void ReplacePercentEncoded( string& workString );	
+		static void ReplacePercentEncoded( string& workString );
+		static string GenerateRandomString() throw();
+		static string SerializeEvents( const string& boundary, const vector<Event>& events );
+		static string CreateHTTPResponse( const string& codeAndDescription, const string& contentType, const string& body );
 		void SocketDispatchThreadFunc();
 		void ConnectionHandlerThreadFunc( int clientSock );
 
-		
+
 		boost::shared_mutex m_bufferMutex;
 		boost::condition_variable_any m_conditionNewEvent;
 		auto_ptr<boost::thread> m_socketDispatchThread;
 		boost::thread_group m_connectionHandlerThreadGroup;
 		Event m_EventBuffer[RESTCOMET_EVENT_BUFFER_SIZE];
 		uint m_currentSequence;
-		
+
 		volatile bool m_terminated;
 		int m_listenSocket;
-		
 
-	//Singleton & non-copyable stuff		
+
+	//Singleton & non-copyable stuff
 	public:
 		static restcomet* Instance( int port );
 		static void Release();
