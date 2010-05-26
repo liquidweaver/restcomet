@@ -3,20 +3,20 @@ PURPOSE:
 
 USAGE:
 	Client side-
-		* You will POST to /EVENTS.LIST on the port you specified in the ctor on your server program
+		* You will POST to /EVENTS.LIST on the port you specified in the ctor in your server program
 		* On first request, post a value 'events' with a pipe-seperated or colon-seperated list of GUID's representing your events.
 		* When you get the request back, note the highest sequence value. You will use this value + 1 in your next request.
 		* On all requests after the first one, you should specify your last known sequence with an http header X-RESTCOMET-SEQUENCE.
 		* If a sequence is not specified, you will get all events that match your event mask that happen after your request.
-		* The reason for the sequence is so that you do not miss event in between your POST requests.
-		* Your events will show up as a MIME multipart response with 200 OK, where each component has a type of "application/restcomet-event
+		* The reason for the sequence is so that you do not miss events in between your POST requests.
+		* Your events will show up as a MIME multipart response with 200 OK, where each component has a type of "application/restcomet-event"
 		* Each event has the following format:
 			S[NUM] G[STRING] T[NUM] L[NUM]
 			DATADATADATADATA....
 		* Where: S is the sequence, G is the GUID of the event, T is the timestamp (epoch), and L is the exact length of the data, in bytes
 			In between the restcomet header and the data, is always on CRLF pair. This is not part of the L (length)
 	Server side-
-		* Come up with a list of well know GUID's and decide on an event format. Event data is opaque to this library; you can even use
-		  binary if you'd like, although I wouldn't recommend it (read the 'Art of UNIX Programming', it's fantastic)
+		* Come up with a list of well know GUID's and decide on an event format. Event data is opaque to this library;
+			you can even use binary if you'd like, although I wouldn't recommend it (read the 'Art of UNIX Programming', it's fantastic)
 		* In your program, grab an instance using the Instance() static method (restcomet is a singleton object)
 		* Call the SubmitEvent method with a GUID and some data.
