@@ -12,9 +12,6 @@
 
 using namespace std;
 
-//DEBUGGING
-#include <iostream>
-
 namespace rc
 {
 
@@ -33,7 +30,6 @@ void restcomet::SubmitEvent( const string& guid, const string& eventData )
 	currentEvent.timestamp = time( NULL );
 	currentEvent.eventData = eventData;
 
-	cout << "Insert Sequence: " << m_currentSequence << endl;
 	//notify all
 	m_conditionNewEvent.notify_all();
 }
@@ -172,8 +168,8 @@ void restcomet::SocketDispatchThreadFunc()
 		unsigned int clientLen = sizeof( clientAddress );
 		int clientSock = accept( m_listenSocket, ( struct sockaddr* ) &clientAddress, &clientLen );
 		int on = 1;
-		if ( setsockopt( clientSock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof( on ) ) < 0 )
-			cout <<  "Could not set SO_KEEPALIVE on client socket";
+		setsockopt( clientSock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof( on ) );
+	
 
 		if ( clientSock >= 0 )
 		{
@@ -257,8 +253,6 @@ void restcomet::ConnectionHandlerThreadFunc( int clientSock )
 			serializedEvents = SerializeEvents( boundary, eventsToReport );
 			string outData = CreateHTTPResponse( "200 OK", string( "multipart/mixed; boundary=\"" ) + boundary + "\"", serializedEvents );
 			int bytesSent = send( clientSock, outData.c_str(), outData.length(), 0 );
-/*			if (  bytesSent > 0 )
-				std::cout << "Good - " << bytesSent << " bytes sent (outData size: " << outData.str().length() << ")."  << endl;*/
 		}
 	}
 	catch ( const string& response )
