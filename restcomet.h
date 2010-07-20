@@ -36,7 +36,7 @@ class restcomet
 		static string CreateHTTPResponse( const string& codeAndDescription, const string& contentType, const string& body );
 		void SocketDispatchThreadFunc();
 		void ConnectionHandlerThreadFunc( int clientSock );
-
+		void ReceiveHTTPRequest( const int clientSock, string& rawRequest );
 
 		boost::shared_mutex m_bufferMutex;
 		boost::condition_variable_any m_conditionNewEvent;
