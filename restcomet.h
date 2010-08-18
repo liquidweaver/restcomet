@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <set>
 #include <boost/thread.hpp>
 #include <boost/regex.hpp>
 
@@ -11,7 +12,7 @@ using namespace std;
 namespace rc
 {
 
-const uint RESTCOMET_EVENT_BUFFER_SIZE = 2048;
+const uint RESTCOMET_EVENT_BUFFER_SIZE = 4096;
 
 struct Event
 {
@@ -19,6 +20,19 @@ struct Event
 	string guid;
 	time_t timestamp;
 	string eventData;
+};
+
+class http_client
+{
+	public:
+	http_client() : state( 0 ), writepos( 0 ), readStarted( time( NULL ) ), current_sequence( 0 ) {}
+	int state; /* reading; waiting; writing */
+	string readbuffer;
+	string writebuffer;
+	uint writepos;
+	time_t readStarted; /* used for timing out invalid clients */
+	uint current_sequence;
+	set<string> eventFilter;
 };
 
 class restcomet
@@ -34,20 +48,25 @@ class restcomet
 		static string GenerateRandomString() throw();
 		static string SerializeEvents( const string& boundary, const vector<Event>& events );
 		static string CreateHTTPResponse( const string& codeAndDescription, const string& contentType, const string& body );
-		void SocketDispatchThreadFunc();
-		void ConnectionHandlerThreadFunc( int clientSock );
-		void ReceiveHTTPRequest( const int clientSock, string& rawRequest );
+		void SocketThreadFunc();
+		void RecvClientData( http_client& client );
+		/** 
+		* @brief Checks if there are current events, if so fills the client writebuffer and sets state to 2 (writing)
+		* 
+		* @param client The client to check
+		* @warning You MUST be in a critical section of m_bufferMutex when calling this function!!
+		*/
+		void CheckClientEvents( http_client& client );
+		static string TrimStr(const string& src, const string& c = " \r\n" );
 
-		boost::shared_mutex m_bufferMutex;
-		boost::condition_variable_any m_conditionNewEvent;
-		auto_ptr<boost::thread> m_socketDispatchThread;
-		boost::thread_group m_connectionHandlerThreadGroup;
+		boost::mutex m_bufferMutex;
+		auto_ptr<boost::thread> m_socketThread;
 		Event m_EventBuffer[RESTCOMET_EVENT_BUFFER_SIZE];
 		uint m_currentSequence;
 
 		volatile bool m_terminated;
 		int m_listenSocket;
-
+		int m_newEventPipes[2];
 
 	//Singleton & non-copyable stuff
 	public:

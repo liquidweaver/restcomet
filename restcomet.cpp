@@ -8,6 +8,7 @@
 #include <sstream>
 #include <vector>
 #include <boost/regex.hpp>
+#include <fcntl.h>
 #include <set>
 
 using namespace std;
@@ -15,38 +16,10 @@ using namespace std;
 namespace rc
 {
 
-int TimedAccept(int sock, struct ::sockaddr* sockAddress, ::socklen_t* sockAddressLen, int timeout)
-{
-    int sfd = sock;
-    if ( sfd < 0 )	//couldn't get socket
-    {   throw runtime_error("no socket");
-    }
-
-    int isReadReady; //number of items ready to be read
-    fd_set wfds;
-    struct timeval tVal;
-    tVal.tv_sec = timeout;	//timeout after n seconds
-    tVal.tv_usec = 0;
-    FD_ZERO ( &wfds );
-    FD_SET ( ( unsigned int ) sfd, &wfds );
-
-    //since this is likely being called from an accept, this should be immediate
-    struct timeval* tValPtr = &tVal;
-    if ( tVal.tv_sec < 0)
-            tValPtr = NULL;
-    isReadReady = select ( sfd+1, &wfds, NULL, NULL, tValPtr );	//sfd should still be in wfds
-    if ( isReadReady > 0  && FD_ISSET ( sfd, &wfds ) )
-    {    return accept(sock, ( struct sockaddr* ) sockAddress, sockAddressLen);
-    }
-    else
-    {   return -1;
-    }
-}
-
 
 void restcomet::SubmitEvent( const string& guid, const string& eventData )
 {
-	boost::unique_lock<boost::shared_mutex> eventsLock;
+	boost::mutex::scoped_lock eventsLock( m_bufferMutex );
 
 	//increment sequence
 	m_currentSequence++;
@@ -58,8 +31,7 @@ void restcomet::SubmitEvent( const string& guid, const string& eventData )
 	currentEvent.timestamp = time( NULL );
 	currentEvent.eventData = eventData;
 
-	//notify all
-	m_conditionNewEvent.notify_all();
+	write( m_newEventPipes[1], "n", 1 );
 }
 
 
@@ -187,167 +159,263 @@ string restcomet::CreateHTTPResponse( const string& codeAndDescription, const st
 	return response.str();
 }
 
-void restcomet::SocketDispatchThreadFunc()
+void restcomet::SocketThreadFunc()
 {
-	while ( !m_terminated )
-	{   
-            int clientSock = 0;
-            bool sockOpen = false;
-            try
-            {
-		struct sockaddr_in clientAddress;
-		unsigned int clientLen = sizeof( clientAddress );
-		clientSock = TimedAccept( m_listenSocket, ( struct sockaddr* ) &clientAddress, &clientLen, 5 );
-                sockOpen = true;
-                int on = 1;
-		setsockopt( clientSock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof( on ) );
-	
 
-		if ( clientSock >= 0 )
+	//int is the socket
+	map<int, http_client> clients;
+
+	fd_set readers, writers;
+	while ( !m_terminated )
+	{
+		time_t now = time( NULL );
+		int fd_max = 0;
+		FD_ZERO( &readers ); FD_ZERO( &writers );
+		if ( m_listenSocket > m_newEventPipes[0] )
+			fd_max = m_listenSocket;
+		else
+			fd_max = m_newEventPipes[0];
+
+		FD_SET( m_listenSocket, &readers );
+		FD_SET( m_newEventPipes[0], &readers );
+
+		for(  map<int, http_client>::iterator client = clients.begin();
+				client != clients.end(); )
 		{
-			m_connectionHandlerThreadGroup.create_thread( boost::bind( &restcomet::ConnectionHandlerThreadFunc, this, clientSock ) );
+			if ( client->second.state == 2 )
+				FD_SET( client->first, &writers );
+
+			if ( client->second.state == 0 && client->second.readStarted + 5 < now )
+			{
+				close( client->first );
+				clients.erase( client );
+				continue;
+			}
+			else
+			{
+				if ( client->first > fd_max )
+					fd_max = client->first;
+				FD_SET( client->first, &readers );
+			}
+			++client;
 		}
-            }
-            catch(boost::thread_interrupted)
-            {
-            }
-            catch(boost::thread_exception &e)
-            {   //did someone spam the socket?
-                if(sockOpen)
-                {   close( clientSock );
-                }
-            }
+
+		struct timeval tv;
+		tv.tv_sec = 3;
+		tv.tv_usec = 0;
+
+		int ready = select( fd_max+1, &readers, &writers, NULL, &tv );
+		
+		if ( FD_ISSET( m_listenSocket, &readers ) )
+		{
+			struct sockaddr_in newClientAddr;
+			socklen_t ncalen = sizeof( newClientAddr );
+			int newClientSock = accept( m_listenSocket, reinterpret_cast<sockaddr*>(&newClientAddr), &ncalen );
+			if ( newClientSock > 0 )
+			{
+				http_client client;
+				clients[newClientSock] = client;
+			}
+		}
+
+		//Is there new events to submit?
+		if ( FD_ISSET( m_newEventPipes[0], &readers ) )
+		{
+			char unused[1024];
+			boost::mutex::scoped_lock( m_bufferMutex );
+
+			//Flush event pipe
+			while ( read( m_newEventPipes[0], &unused, 1024 ) > 0 ) {}
+
+			for(  map<int, http_client>::iterator client = clients.begin();
+					client != clients.end(); ++client)
+			{
+				//skip unless waiting for events
+				if ( client->second.state != 1 )
+					continue;
+
+				CheckClientEvents( client->second );
+			}
+		}
+
+		for(  map<int, http_client>::iterator client = clients.begin();
+				client != clients.end(); )
+		{
+			try
+			{
+				if ( FD_ISSET( client->first, &readers ) )
+				{
+					char buffer[2048];
+
+					ssize_t recvd = recv( client->first, buffer, 2048, NULL );
+					if ( recvd > 0 )
+					{
+						if ( client->second.state == 0 )
+						{
+							//Limit amount of data we can recv (8k? That should be plenty...)
+							if ( recvd + client->second.readbuffer.length() > 8192 )
+								throw CreateHTTPResponse( "400 Request Too Large", "text/html", "Request too large." );
+							else
+							{
+								client->second.readbuffer += string( buffer, recvd );
+								RecvClientData( client->second );
+							}
+
+						}
+					}
+					else //Far side hungup or socket is in error, so close
+					{
+						close( client->first );
+						clients.erase( client++ );
+						continue;	
+					}
+				}
+			}
+			catch( string& response )
+			{
+				client->second.state = 2;
+				client->second.writebuffer = response;
+			}
+
+			if ( client->second.state == 2 && FD_ISSET( client->first, &writers ) )
+			{
+				int written = send( client->first, &client->second.writebuffer.c_str()[client->second.writepos], client->second.writebuffer.length() - client->second.writepos, NULL );
+				client->second.writepos += written;
+				if ( client->second.writepos == client->second.writebuffer.length() )
+				{
+					close( client->first );
+					clients.erase( client++ );
+					continue;
+				}
+			}
+			++client;
+		}	
+
+
 	}
+
+
 }
 
-void restcomet::ConnectionHandlerThreadFunc( int clientSock )
+void restcomet::RecvClientData( http_client& client )
 {
 	try
 	{
-		string rawRequest;
-		ReceiveHTTPRequest( clientSock, rawRequest );
+		const char rnrn[] = "\r\n\r\n";
+		uint headerLen, contentLen;
 
-		if (fcntl( clientSock, F_SETFL, O_NONBLOCK) == 1)
-			throw CreateHTTPResponse( "500 Internal Server Error", "text/html", "Could not set non-blocking on socket" );
-		uint sequence = m_currentSequence + 1;
-		boost::regex rxResource( "^POST /EVENTS\\.LIST HTTP/1\\.1" );
-		boost::regex rxSequence( "X-RESTCOMET-SEQUENCE: (\\d+)" );
-		boost::regex rxGuid( "[^:|]+" );
-		boost::smatch matches;
-		if (!boost::regex_search(rawRequest, matches, rxResource ) )
-			throw CreateHTTPResponse( "404 Not Found", "text/html", "<h3>404 Not Found</h3><small>Did you want to post to EVENTS.LIST by chance?</small>" );
-		if ( boost::regex_search(rawRequest, matches, rxSequence ) )
-		{
-			stringstream seqStream;
-			seqStream << matches[1];
-			seqStream >> sequence;
-		}
-		set<string> eventFilter;
-
-		unsigned int postStart = rawRequest.find( "\r\n\r\n" );
-		string postString = "";
-		if ( postStart == string::npos || postStart + 4 > rawRequest.length() )
-			throw CreateHTTPResponse( "400 No Post Data", "text/html", "400 No Post Data" );
-
-		//Yeah, length will be greater but I want all of it anyways
-		postString = rawRequest.substr( postStart + 4, rawRequest.length() );
-		map<string, string> postData = DecodePostData( postString );
-
-		if ( postData.find("events") == postData.end() )
-			throw CreateHTTPResponse( "400 No Events Specified", "text/html", "400 No Events Specified" );
-
-		boost::match_results<std::string::const_iterator> terms;
-		string::const_iterator start, end;
-		start = postData["events"].begin();
-		end = postData["events"].end();
-		while ( boost::regex_search( start, end, terms, rxGuid, boost::match_default ) )
-		{
-			eventFilter.insert( string( terms[0].first, terms[0].second ) );
-			start = terms[0].second;
-		}
-
-		vector<Event> eventsToReport;
-		do
-		{
-			boost::shared_lock<boost::shared_mutex> eventBufferSharedLock( m_bufferMutex );
-			if ( sequence > m_currentSequence + 1 )
-				throw CreateHTTPResponse( "400 Future Sequence", "text/html", "400 Future Sequence" );
-
-			for( ;sequence <= m_currentSequence; ++sequence )
-			{
-				uint eventPos = sequence % RESTCOMET_EVENT_BUFFER_SIZE;
-				if ( eventFilter.find( m_EventBuffer[eventPos].guid ) != eventFilter.end() )
-					eventsToReport.push_back( m_EventBuffer[eventPos] );
-			}
-
-			if (eventsToReport.empty() )
-				m_conditionNewEvent.wait( eventBufferSharedLock );
-
-			//Check socket health
-			char buf[1];
-			if ( recv( clientSock, buf, 0, MSG_PEEK ) == 0 ) //Will be 0 is socket disconnected. Requires O_NONBLOCK to work
-				throw 0;
-		} while (eventsToReport.empty());
-
-		//Ok - send events
-		string boundary, serializedEvents;
-		boundary = GenerateRandomString();
-		serializedEvents = SerializeEvents( boundary, eventsToReport );
-		string outData = CreateHTTPResponse( "200 OK", string( "multipart/mixed; boundary=\"" ) + boundary + "\"", serializedEvents );
-		/* int bytesSent =*/ send( clientSock, outData.c_str(), outData.length(), 0 );
-		
-	}
-	catch ( const string& response )
-	{
-		send( clientSock, response.c_str(), response.length(), 0 );
-	}
-	catch(...)
-	{ } //Cancel this request
-
-	close( clientSock );
-}
-
-void	restcomet::ReceiveHTTPRequest( const int clientSock, string& rawRequest )
-{
-	const char rnrn[] = "\r\n\r\n";
-	char buf[4096];
-	ssize_t recvd = 0;
-	long int contentLen = LONG_MAX, headerLen = 0;
-	do
-	{
-		ssize_t lastRecvd = 0;
-		
-		if ( recvd >= 4096 )
-			throw CreateHTTPResponse( "500 Internal Server Error", "text/html", "Ran out of buffer to process POST request" );
-
-		lastRecvd = recv( clientSock, &buf[recvd], 4096 - recvd, 0 );
-		if ( lastRecvd == 0 )
-			throw runtime_error( "Connection reset" );
-		else if ( lastRecvd < 0 )
-		{
-			perror( "ReceiveHTTPRequest" );
-			abort();
-		}
-		recvd += lastRecvd;
-
-		char* headerEnd = reinterpret_cast<char*>( memmem( buf, recvd, rnrn, sizeof( rnrn ) - 1 ) ); //-1 for null zero 
-		if ( headerEnd != NULL )
+		size_t headerEnd = client.readbuffer.find( rnrn );
+		if ( headerEnd != string::npos )
 		{
 			boost::regex rxContentLength( "Content-Length: (\\d+)", boost::regbase::icase );
 			boost::smatch matches;
-			rawRequest = string( buf, recvd );	
 
-			if ( boost::regex_search(rawRequest, matches, rxContentLength ) )
+			if ( boost::regex_search(client.readbuffer, matches, rxContentLength ) )
 			{
 				stringstream clStream;
-				headerLen = (headerEnd - buf) + 2;
+				headerLen = headerEnd + 4;
 				clStream << matches[1];
 				clStream >> contentLen;	
 			}
 			else
 				throw CreateHTTPResponse( "400 Bad Header", "text/html", "400 Bad Header (Content-Length not found)" );
+
+			if ( client.readbuffer.length() >= headerLen + contentLen )
+			{
+				client.current_sequence = m_currentSequence + 1;
+
+				boost::regex rxResource( "^POST /EVENTS\\.LIST HTTP/1\\.1" );
+				boost::regex rxSequence( "X-RESTCOMET-SEQUENCE: (\\d+)" );
+				boost::regex rxGuid( "[^:|]+" );
+				boost::smatch matches;
+				if (!boost::regex_search(client.readbuffer, matches, rxResource ) )
+					throw CreateHTTPResponse( "404 Not Found", "text/html", "<h3>404 Not Found</h3><small>Did you want to post to EVENTS.LIST by chance?</small>" );
+				if ( boost::regex_search(client.readbuffer, matches, rxSequence ) )
+				{
+					stringstream seqStream;
+					seqStream << matches[1];
+					seqStream >> client.current_sequence;
+				}
+
+				if ( client.current_sequence > m_currentSequence + 1 )
+					throw CreateHTTPResponse( "400 Future Sequence", "text/html", "400 Future Sequence" );
+
+				string postString = "";
+				if ( headerEnd == string::npos || headerEnd + 4 > client.readbuffer.length() )
+					throw CreateHTTPResponse( "400 No Post Data", "text/html", "400 No Post Data" );
+
+				//Yeah, length will be greater but I want all of it anyways
+				postString = client.readbuffer.substr( headerLen, client.readbuffer.length() );
+				map<string, string> postData = DecodePostData( postString );
+
+				if ( postData.find("events") == postData.end() )
+					throw CreateHTTPResponse( "400 No Events Specified", "text/html", "400 No Events Specified" );
+
+				boost::match_results<std::string::const_iterator> terms;
+				string::const_iterator start, end;
+				start = postData["events"].begin();
+				end = postData["events"].end();
+				while ( boost::regex_search( start, end, terms, rxGuid, boost::match_default ) )
+				{
+					client.eventFilter.insert( TrimStr( string( terms[0].first, terms[0].second ) ) );
+					start = terms[0].second;
+				}
+
+				client.state = 1;
+				{ 	boost::mutex::scoped_lock( m_bufferMutex );
+					CheckClientEvents( client );
+				}
+
+			}
 		}
-	} while ( recvd < contentLen + headerLen );
+	}
+	catch ( const string& response )
+	{ //Rethrow since it's an http response
+		throw;
+	}
+	catch( ... )
+	{
+		throw CreateHTTPResponse( "500 Internal Server Error", "text/html", "<h3>500 Internal Server Error</h3>" );
+	} 
+
+
+}
+
+void restcomet::CheckClientEvents( http_client& client )
+{
+	vector<Event> eventsToReport;
+	uint& sequence = client.current_sequence;
+	set<string>& eventFilter = client.eventFilter;
+
+	for( ;sequence <= m_currentSequence; ++sequence )
+	{
+		uint eventPos = sequence % RESTCOMET_EVENT_BUFFER_SIZE;
+		if ( eventFilter.find( m_EventBuffer[eventPos].guid ) != eventFilter.end() )
+			eventsToReport.push_back( m_EventBuffer[eventPos] );
+	}
+
+	if ( !eventsToReport.empty() )
+	{
+		//Ok - send events
+		string boundary, serializedEvents;
+		boundary = GenerateRandomString();
+		serializedEvents = SerializeEvents( boundary, eventsToReport );
+		client.writebuffer =  CreateHTTPResponse( "200 OK", string( "multipart/mixed; boundary=\"" ) + boundary + "\"", serializedEvents );
+		client.state = 2;
+	}
+}
+
+string restcomet::TrimStr(const string& src, const string& c )
+{
+	int p2 = src.find_last_not_of( c );
+	if ( p2 == std::string::npos )
+		return std::string();
+
+	int p1 = src.find_first_not_of( c );
+	if ( p1 == std::string::npos )
+		p1 = 0;
+
+	return src.substr( p1, ( p2-p1 )+1 );
 }
 
 restcomet::restcomet( int port ) : m_currentSequence( 0 ), m_terminated( false )
@@ -355,47 +423,64 @@ restcomet::restcomet( int port ) : m_currentSequence( 0 ), m_terminated( false )
 
 	struct sockaddr_in thisAddress;
 	signal(SIGPIPE, SIG_IGN); // Block SIGPIPE
-	m_listenSocket = socket( PF_INET, SOCK_STREAM, IPPROTO_TCP );
+	try
+	{
+		int flags = 0;
+		if ( pipe( m_newEventPipes ) == -1 )
+			throw runtime_error( "Could not create new event pipe pair" );
+		if ( ( flags = fcntl( m_newEventPipes[0], F_GETFL ) ) < 0 )
+			throw runtime_error( "Could not get flags on event pipe reader" );
+		flags |= O_NONBLOCK;
+		if ( fcntl( m_newEventPipes[0], F_SETFL, flags ) < 0 )
+			throw runtime_error( "Could not set O_NONBLOCK on event pipe reader" );
+		m_listenSocket = socket( PF_INET, SOCK_STREAM, IPPROTO_TCP );
 
-	if ( m_listenSocket == 0 )
-		throw runtime_error( "Could not create listener socket" );
+		if ( m_listenSocket == 0 )
+			throw runtime_error( "Could not create listener socket" );
 
-	int on = 1;
+		int on = 1;
 
-	if ( setsockopt( m_listenSocket, SOL_SOCKET, SO_REUSEADDR, &on, sizeof( on ) ) < 0 )
-		throw runtime_error( "Could not set SO_REUSEADDR on listener socket" );
+		if ( setsockopt( m_listenSocket, SOL_SOCKET, SO_REUSEADDR, &on, sizeof( on ) ) < 0 )
+			throw runtime_error( "Could not set SO_REUSEADDR on listener socket" );
 
-	memset( &thisAddress, 0, sizeof( thisAddress ) );
+		memset( &thisAddress, 0, sizeof( thisAddress ) );
 
-	thisAddress.sin_family = AF_INET;                  // Internet/IP
+		thisAddress.sin_family = AF_INET;                  // Internet/IP
 
-	thisAddress.sin_addr.s_addr = htonl( INADDR_ANY ); // Incoming addr
+		thisAddress.sin_addr.s_addr = htonl( INADDR_ANY ); // Incoming addr
 
-	thisAddress.sin_port = htons( port );       			// server port
+		thisAddress.sin_port = htons( port );       			// server port
 
-	if ( bind( m_listenSocket, ( struct sockaddr* ) &thisAddress, sizeof( thisAddress ) ) < 0 )
-		throw runtime_error( "Could not bind to port for incoming connections" );
+		if ( bind( m_listenSocket, ( struct sockaddr* ) &thisAddress, sizeof( thisAddress ) ) < 0 )
+			throw runtime_error( "Could not bind to port for incoming connections" );
 
-	if ( listen( m_listenSocket, 100 ) < 0 )
-		throw runtime_error( "Could not listen on socket" );
+		if ( listen( m_listenSocket, 100 ) < 0 )
+			throw runtime_error( "Could not listen on socket" );
 
-	m_socketDispatchThread.reset( new boost::thread( boost::bind( &restcomet::SocketDispatchThreadFunc, this ) ) );
-
+		m_socketThread.reset( new boost::thread( boost::bind( &restcomet::SocketThreadFunc, this ) ) );
+	}
+	catch ( exception& e )
+	{
+		close( m_listenSocket );
+		close( m_newEventPipes[0] );
+		close( m_newEventPipes[1] );
+		throw;
+	}
 }
 
 restcomet::~restcomet()
 {
 	m_terminated = true;
 
-	if ( m_socketDispatchThread.get() != NULL )
+	if ( m_socketThread.get() != NULL )
 	{
-		m_socketDispatchThread->interrupt();
-		m_socketDispatchThread->join();
+		//Induce select() to return
+		write( m_newEventPipes[1], "n", 1 );
+		m_socketThread->join();
 	}
-	m_connectionHandlerThreadGroup.interrupt_all();
 
-	m_connectionHandlerThreadGroup.join_all();
-
+	close( m_newEventPipes[0]);
+	close( m_newEventPipes[1]);
 	close( m_listenSocket );
 }
 
