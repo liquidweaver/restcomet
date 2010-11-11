@@ -12,7 +12,7 @@ using namespace std;
 namespace rc
 {
 
-const uint RESTCOMET_EVENT_BUFFER_SIZE = 4096;
+const int RESTCOMET_EVENT_BUFFER_SIZE = 8192;
 
 struct Event
 {
@@ -31,7 +31,7 @@ class http_client
 	string writebuffer;
 	uint writepos;
 	time_t readStarted; /* used for timing out invalid clients */
-	uint current_sequence;
+	int current_sequence;
 	set<string> eventFilter;
 };
 
@@ -62,7 +62,7 @@ class restcomet
 		boost::mutex m_bufferMutex;
 		auto_ptr<boost::thread> m_socketThread;
 		Event m_EventBuffer[RESTCOMET_EVENT_BUFFER_SIZE];
-		uint m_currentSequence;
+		int m_currentSequence;
 
 		volatile bool m_terminated;
 		int m_listenSocket;
