@@ -17,7 +17,6 @@ using namespace std;
 namespace rc
 {
 
-
 void restcomet::SubmitEvent( const string& guid, const string& eventData )
 {
 	boost::mutex::scoped_lock eventsLock( m_bufferMutex );
@@ -145,10 +144,37 @@ string restcomet::CreateHTTPResponse( const string& codeAndDescription, const st
 					"Pragma: no-cache\r\n"
 					"Cache-Control: no-cache\r\n"
 					"Server: RestComet\r\n"
+					"Access-Control-Allow-Origin: *\r\n"
+					"Access-Control-Allow-Methods: POST\r\n"
+					"Access-Control-Allow-Headers: x-requested-with, x-restcomet-sequence\r\n"
 					"Content-Type: " << contentType << "\r\n"
 					"Content-Length: " << body.length() << "\r\n\r\n"
 					<< body;
 	return response.str();
+}
+string restcomet::CreateCORSResponse()
+{
+	ostringstream response;
+	char dateBuffer[200];
+	time_t t;
+	tm * ptm;
+	time ( & t );
+	ptm = gmtime ( & t );
+	strftime( dateBuffer, 200, "%a, %d %b %Y %X GMT", ptm);
+
+
+
+	response << "HTTP/1.1 200 OK \r\n"
+					"Date: " << dateBuffer << "\r\n"
+					"Pragma: no-cache\r\n"
+					"Cache-Control: no-cache\r\n"
+					"Server: RestComet\r\n"
+					"Access-Control-Allow-Origin: *\r\n"
+					"Access-Control-Allow-Methods: POST\r\n"
+					"Access-Control-Allow-Headers: x-requested-with, x-restcomet-sequence\r\n"
+					"Content-Type: text/plain\r\n"
+					"Content-Length: 0\r\n\r\n";
+		return response.str();
 }
 
 void restcomet::SocketThreadFunc()
@@ -280,6 +306,8 @@ void restcomet::RecvClientData( http_client& client )
 		size_t headerEnd = client.readbuffer.find( rnrn );
 		if ( headerEnd != string::npos )
 		{
+			if ( client.readbuffer.find( "OPTIONS" ) == 0 ) 
+				throw CreateCORSResponse();
 			boost::regex rxContentLength( "Content-Length: (\\d+)", boost::regbase::icase );
 			boost::smatch matches;
 

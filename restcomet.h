@@ -48,6 +48,7 @@ class restcomet
 		static string GenerateRandomString() throw();
 		static string SerializeEvents( const string& boundary, const vector<Event>& events );
 		static string CreateHTTPResponse( const string& codeAndDescription, const string& contentType, const string& body );
+		static string CreateCORSResponse();
 		void SocketThreadFunc();
 		void RecvClientData( http_client& client );
 		/** 
@@ -78,7 +79,6 @@ class restcomet
 		restcomet( int port );
 		~restcomet();
 		static restcomet* ms_instance;
-
 };
 
 }
